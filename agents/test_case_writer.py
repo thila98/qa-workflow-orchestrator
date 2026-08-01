@@ -174,7 +174,8 @@ Rules:
 - steps must be numbered: 1. step one 2. step two 3. step three
 - expected_result must be specific - never say "works correctly" or "no errors"
 - precondition must describe the exact starting state
-- Generate at minimum 15 test cases, aim for the estimated count in the strategy
+- Generate exactly 10 test cases maximum - quality over quantity
+- Keep each field concise - maximum 1-2 sentences
 - Do not add any text before or after the JSON
 - Do not wrap in markdown code blocks"""
 
@@ -185,7 +186,7 @@ Rules:
         try:
             response = client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=8000,
+                max_tokens=8096,
                 temperature=0,
                 system=SYSTEM_PROMPT,
                 messages=[
