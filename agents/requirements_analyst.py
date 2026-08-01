@@ -124,7 +124,9 @@ Rules:
 - is_testable must be true or false
 - needs_clarification must be true or false
 - Do not add any text before or after the JSON
-- Do not wrap the JSON in markdown code blocks"""
+- Do not wrap the JSON in markdown code blocks
+- Keep each list item concise - maximum 1 sentence each
+- Limit gaps, ambiguities and assumptions to maximum 5 items each"""
 
     # Retry loop - handles transient API failures
     max_retries = int(os.getenv("MAX_RETRIES", "3"))
@@ -134,7 +136,7 @@ Rules:
         try:
             response = client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=2000,
+                max_tokens=3000,
                 temperature=0,  # Temperature 0 = most consistent outputs
                 system=SYSTEM_PROMPT,
                 messages=[
