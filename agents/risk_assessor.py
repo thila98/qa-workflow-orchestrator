@@ -137,7 +137,9 @@ Rules for overall_risk_level: Low, Medium, High, Critical
 - Security risks with score >= 15 must appear in critical_risks list
 - Score must equal likelihood multiplied by impact
 - Do not add any text before or after the JSON
-- Do not wrap in markdown code blocks"""
+- Do not wrap in markdown code blocks
+- Keep descriptions concise - maximum 2 sentences each
+- Limit to maximum 8 risk areas total"""
 
     max_retries = int(os.getenv("MAX_RETRIES", "3"))
     last_error = None
@@ -146,7 +148,7 @@ Rules for overall_risk_level: Low, Medium, High, Critical
         try:
             response = client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=3000,
+                max_tokens=4000,
                 temperature=0,
                 system=SYSTEM_PROMPT,
                 messages=[
