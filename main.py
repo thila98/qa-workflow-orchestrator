@@ -53,7 +53,18 @@ def run_agent_with_judge(
     workflow_state,
     circuit_breaker
 ):
-    """Runs a single agent and immediately validates with the Judge Agent."""
+    """
+    Runs a single agent and immediately validates with the Judge Agent.
+    
+    If Judge returns PASS_WITH_WARNINGS, runs a correction loop:
+    - Extracts specific warnings from the Judge
+    - Re-runs the agent once with corrections appended to the prompt
+    - Judge validates the corrected output
+    - Maximum 1 correction attempt per agent
+    
+    This feedback loop ensures agents self-correct before output
+    reaches the human reviewer.
+    """
 
     console.print(f"\n[bold cyan]Running {agent_name}...[/bold cyan]")
     start_time = time.time()
@@ -95,10 +106,59 @@ def run_agent_with_judge(
             f"Judge Agent rejected {agent_name} output. "
             f"Reason: {judgment.get('recommendation_reason', 'Unknown')}"
         )
+
     elif recommendation == "PASS_WITH_WARNINGS":
-        console.print(f"[yellow]  Judge Agent: PASS WITH WARNINGS[/yellow]")
+        console.print(f"[yellow]  Judge Agent: PASS WITH WARNINGS — running correction loop...[/yellow]")
         for issue in judgment.get("quality_issues", []):
             console.print(f"[yellow]    - {issue}[/yellow]")
+
+        # Build correction prompt from Judge warnings
+        quality_issues = judgment.get("quality_issues", [])
+        missing_elements = judgment.get("completeness_check", {}).get("missing_elements", [])
+        
+        corrections = quality_issues + missing_elements
+        
+        if corrections and "correction_attempt" not in agent_args:
+            # Format corrections clearly for the agent
+            correction_text = "\n".join([f"- {c}" for c in corrections[:5]])
+            
+            console.print(f"[cyan]  Applying corrections and re-running {agent_name}...[/cyan]")
+            
+            # Add correction instructions to agent args
+            corrected_args = dict(agent_args)
+            corrected_args["correction_attempt"] = True
+            corrected_args["correction_notes"] = (
+                f"CORRECTION REQUIRED: Your previous output had these issues:\n"
+                f"{correction_text}\n"
+                f"Please address all of these in your response."
+            )
+
+            try:
+                corrected_output = agent_func(**corrected_args)
+                corrected_validation = validate_func(corrected_output)
+
+                if corrected_validation.is_valid:
+                    corrected_judgment = judge_output(
+                        agent_name=agent_name,
+                        original_input=original_input,
+                        agent_output=corrected_output,
+                        previous_outputs=previous_outputs
+                    )
+                    corrected_rec = corrected_judgment.get("recommendation", "PASS")
+
+                    if corrected_rec != "FAIL":
+                        console.print(f"[green]  Correction successful — {agent_name} improved[/green]")
+                        return corrected_output, corrected_validation, corrected_judgment
+                    else:
+                        console.print(f"[yellow]  Correction did not resolve all issues — using original output[/yellow]")
+                else:
+                    console.print(f"[yellow]  Corrected output failed validation — using original[/yellow]")
+
+            except Exception as e:
+                console.print(f"[yellow]  Correction attempt failed: {str(e)} — using original output[/yellow]")
+        else:
+            console.print(f"[yellow]  No actionable corrections identified — accepting output[/yellow]")
+
     else:
         console.print(
             f"[green]  Judge Agent: PASS "

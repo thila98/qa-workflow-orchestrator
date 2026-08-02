@@ -8,24 +8,11 @@ deciding what types of testing are needed,
 what to automate, what to do manually,
 and what the entry and exit criteria are.
 
-What it does:
-- Takes Agent 1 and Agent 2 outputs as input
-- Decides which test types are needed and why
-- Prioritises based on risk scores
-- Recommends manual vs automated for each area
-- Defines entry and exit criteria
-- Estimates test case count
-
-Why this matters:
-Without a strategy you either over-test (waste time)
-or under-test (miss bugs). The strategy makes sure
-testing effort matches actual risk.
-
-Edge cases handled:
-- All risks are low: recommends lightweight strategy
-- Security risks present: mandates security testing
-- Performance risks present: adds load testing
-- Simple UI change: deprioritises backend testing
+IMPORTANT DESIGN DECISION:
+Agent 3 is a test strategist NOT a risk scorer.
+Agent 2 has already scored all risks.
+Agent 3 receives the full risk matrix and must
+reference those exact scores - never invent new ones.
 """
 
 import os
@@ -36,13 +23,12 @@ from anthropic import Anthropic
 
 load_dotenv()
 
-
 SYSTEM_PROMPT = """You are a Senior Test Architect with 15 years of experience
 designing test strategies for software features of all sizes and risk levels.
 
-Your role is to take a requirement and its risk assessment and produce
-a practical, actionable test strategy. You are realistic about time and effort.
-You do not recommend testing everything - you recommend testing the right things.
+CRITICAL RULE: You are NOT a risk scorer. Agent 2 has already scored all risks.
+When referencing risks, use only the names and scores from the risk matrix provided.
+Never invent, adjust, or estimate risk scores.
 
 Your strategies are grounded in real QA practice:
 - High risk areas get more test coverage
@@ -54,25 +40,15 @@ Always respond in valid JSON format matching the exact schema provided."""
 
 
 def create_test_strategy(
-    requirement: str,
-    requirements_analysis: dict,
-    risk_assessment: dict,
+    requirement,
+    requirements_analysis,
+    risk_assessment,
     workflow_state=None,
-    circuit_breaker=None
-) -> dict:
-    """
-    Creates a test strategy based on requirement and risk assessment.
-
-    Args:
-        requirement: Original requirement text
-        requirements_analysis: Output from Agent 1
-        risk_assessment: Output from Agent 2
-        workflow_state: Current workflow state
-        circuit_breaker: Safety controls instance
-
-    Returns:
-        Dictionary with test strategy
-    """
+    circuit_breaker=None,
+    correction_notes=None,
+    correction_attempt=False
+):
+    """Creates a test strategy based on requirement and risk assessment."""
 
     agent_name = "Test Strategist"
     agent_start_time = time.time()
@@ -82,79 +58,83 @@ def create_test_strategy(
 
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-    # Build context from previous agents
-    top_risks = risk_assessment.get("top_risks", [])
     overall_risk = risk_assessment.get("overall_risk_level", "Medium")
     security_present = risk_assessment.get("security_risks_present", False)
     performance_present = risk_assessment.get("performance_risks_present", False)
     critical_risks = risk_assessment.get("critical_risks", [])
+    top_risks = risk_assessment.get("top_risks", [])
 
-    prompt = f"""Create a test strategy for the following software feature.
+    # Format full risk matrix so Agent 3 references exact scores
+    risk_matrix_text = ""
+    for risk in risk_assessment.get("risk_areas", []):
+        risk_matrix_text += (
+            f"- {risk.get('name','')}: "
+            f"Likelihood={risk.get('likelihood','')}, "
+            f"Impact={risk.get('impact','')}, "
+            f"Score={risk.get('score','')}, "
+            f"Priority={risk.get('priority_level','')}\n"
+        )
 
-REQUIREMENT SUMMARY:
-{requirements_analysis.get("summary", requirement)}
+    prompt = (
+        "Create a test strategy for the following software feature.\n\n"
+        "YOU ARE A TEST STRATEGIST NOT A RISK SCORER.\n"
+        "Agent 2 has already scored all risks. Reference those exact scores only.\n"
+        "Never invent, adjust, or estimate risk scores.\n\n"
+        f"REQUIREMENT SUMMARY:\n{requirements_analysis.get('summary', requirement)}\n\n"
+        f"KEY TEST AREAS:\n{requirements_analysis.get('key_test_areas', [])}\n\n"
+        "FULL RISK MATRIX FROM AGENT 2 (use these exact scores):\n"
+        f"Overall risk level: {overall_risk}\n"
+        f"{risk_matrix_text}"
+        f"Top risks: {top_risks}\n"
+        f"Critical risks: {critical_risks}\n"
+        f"Security risks present: {security_present}\n"
+        f"Performance risks present: {performance_present}\n\n"
+        "Respond with ONLY a valid JSON object:\n\n"
+        "{\n"
+        '  "strategy_summary": "2-3 sentence summary of the testing approach",\n'
+        '  "test_types": [\n'
+        "    {\n"
+        '      "type": "Functional Testing",\n'
+        '      "reason": "Why this type is needed - max 10 words",\n'
+        '      "priority": "High",\n'
+        '      "approach": "Manual"\n'
+        "    }\n"
+        "  ],\n"
+        '  "priorities": [\n'
+        "    {\n"
+        '      "area": "Area name",\n'
+        '      "reason": "Why priority - max 10 words",\n'
+        '      "risk_reference": "Copy exact score from risk matrix e.g. Score 20 High"\n'
+        "    }\n"
+        "  ],\n"
+        '  "manual_tests": ["What to test manually - max 10 words each"],\n'
+        '  "automated_tests": ["What to automate - max 10 words each"],\n'
+        '  "entry_criteria": ["Condition before testing starts - max 10 words each"],\n'
+        '  "exit_criteria": ["Condition that defines done - max 10 words each"],\n'
+        '  "out_of_scope": ["Item not included - max 8 words each"],\n'
+        '  "estimated_test_cases": 25,\n'
+        '  "estimated_hours": 8,\n'
+        '  "security_testing_required": false,\n'
+        '  "performance_testing_required": false,\n'
+        '  "regression_testing_required": true,\n'
+        '  "recommendations": ["Specific recommendation - max 15 words each"]\n'
+        "}\n\n"
+        "Rules:\n"
+        "- If security_risks_present is true, security_testing_required MUST be true\n"
+        "- If performance_risks_present is true, performance_testing_required MUST be true\n"
+        "- risk_reference must copy the exact score from the risk matrix above\n"
+        "- STRICT LIMIT: maximum 4 test_types\n"
+        "- STRICT LIMIT: maximum 3 priorities\n"
+        "- STRICT LIMIT: maximum 3 items in manual_tests and automated_tests\n"
+        "- STRICT LIMIT: maximum 3 entry and exit criteria\n"
+        "- STRICT LIMIT: maximum 2 out_of_scope items\n"
+        "- STRICT LIMIT: maximum 3 recommendations\n"
+        "- Do not add any text before or after the JSON\n"
+        "- Do not wrap in markdown code blocks"
+    )
 
-KEY TEST AREAS:
-{requirements_analysis.get("key_test_areas", [])}
-
-RISK ASSESSMENT SUMMARY:
-Overall risk level: {overall_risk}
-Top risks: {top_risks}
-Critical risks: {critical_risks}
-Security risks present: {security_present}
-Performance risks present: {performance_present}
-
-Respond with ONLY a valid JSON object matching this exact schema:
-
-{{
-  "strategy_summary": "2-3 sentence plain English summary of the testing approach",
-  "test_types": [
-    {{
-      "type": "Functional Testing",
-      "reason": "Why this type of testing is needed",
-      "priority": "High",
-      "approach": "Manual or Automated or Both"
-    }}
-  ],
-  "priorities": [
-    {{
-      "area": "Name of the area to prioritise",
-      "reason": "Why this area needs priority attention",
-      "risk_score": 20
-    }}
-  ],
-  "manual_tests": [
-    "Description of what should be tested manually and why"
-  ],
-  "automated_tests": [
-    "Description of what should be automated and why"
-  ],
-  "entry_criteria": [
-    "Condition that must be true before testing can start"
-  ],
-  "exit_criteria": [
-    "Condition that defines when testing is complete"
-  ],
-  "out_of_scope": [
-    "Testing areas explicitly not included and why"
-  ],
-  "estimated_test_cases": 25,
-  "estimated_hours": 8,
-  "security_testing_required": false,
-  "performance_testing_required": false,
-  "regression_testing_required": true,
-  "recommendations": [
-    "Specific recommendations for the QA team"
-  ]
-}}
-
-Rules:
-- If security_risks_present is true, security_testing_required MUST be true
-- If performance_risks_present is true, performance_testing_required MUST be true
-- test_types priority must be: High, Medium, or Low
-- estimated_test_cases must be a realistic integer based on the complexity
-- Do not add any text before or after the JSON
-- Do not wrap in markdown code blocks"""
+    if correction_notes:
+        prompt += f"\n\nCORRECTION REQUIRED - please fix these issues:\n{correction_notes}"
 
     max_retries = int(os.getenv("MAX_RETRIES", "3"))
     last_error = None
@@ -166,9 +146,7 @@ Rules:
                 max_tokens=4000,
                 temperature=0,
                 system=SYSTEM_PROMPT,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
+                messages=[{"role": "user", "content": prompt}]
             )
 
             if workflow_state and circuit_breaker:
@@ -188,15 +166,13 @@ Rules:
 
             result = json.loads(raw_output)
 
-            # Enforce security testing if risks present
+            # Enforce security and performance testing based on risk flags
             if security_present:
                 result["security_testing_required"] = True
-
-            # Enforce performance testing if risks present
             if performance_present:
                 result["performance_testing_required"] = True
 
-            if workflow_state:
+            if workflow_state and not correction_attempt:
                 workflow_state.completed_agents.append(agent_name)
 
             return result

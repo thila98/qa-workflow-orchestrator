@@ -5,26 +5,6 @@ Optional agent - only runs if user provides an existing test suite CSV.
 
 Human job it replaces: QA Lead manually comparing new test cases
 against the existing test suite to find gaps and duplicates.
-This is tedious work that typically takes 30-60 minutes manually.
-
-What it does:
-- Compares new test cases from Agent 4 against existing test suite
-- Identifies genuine gaps - scenarios not covered anywhere
-- Identifies potential duplicates - overlap with existing tests
-- Flags outdated existing tests that may need updating
-- Produces a coverage gap report with clear recommendations
-
-Why this matters:
-Without this comparison, teams often write duplicate test cases
-wasting effort, or miss gaps because they assume existing tests
-cover something they actually do not.
-
-Edge cases handled:
-- No CSV provided: skips gracefully, outputs a note
-- Empty or malformed CSV: flags error and skips gracefully
-- 100% coverage already: outputs no gaps found honestly
-- CSV with different column names: maps intelligently
-- Zero overlap with existing tests: flags as new test territory
 """
 
 import os
@@ -36,50 +16,33 @@ from tools.csv_reader import read_test_suite, format_for_agent
 
 load_dotenv()
 
-
 SYSTEM_PROMPT = """You are a Senior QA Lead with 15 years of experience reviewing
 test suites for gaps, duplicates, and coverage quality.
 
-Your role is to compare a newly generated set of test cases against
-an existing test suite and identify:
-1. Gaps - scenarios in the new tests not covered by existing tests
-2. Duplicates - new tests that overlap significantly with existing tests
-3. Update candidates - existing tests that may need updating based on new requirements
-4. Coverage assessment - honest estimate of overall coverage after combining both sets
-
+You compare newly generated test cases against an existing test suite.
 You are honest and precise. You do not fabricate gaps or duplicates.
 If coverage is already good, you say so.
-If there are real gaps, you identify them specifically.
 
 Always respond in valid JSON format matching the exact schema provided."""
 
 
 def analyse_coverage(
-    requirement: str,
-    test_cases_output: dict,
-    existing_suite_path: str,
+    requirement,
+    test_cases_output,
+    existing_suite_path,
     workflow_state=None,
-    circuit_breaker=None
-) -> dict:
+    circuit_breaker=None,
+    correction_notes=None,
+    correction_attempt=False
+):
     """
     Compares new test cases against existing test suite for gaps and duplicates.
-
-    Args:
-        requirement: Original requirement text
-        test_cases_output: Output from Agent 4 (Test Case Writer)
-        existing_suite_path: Path to the existing test suite CSV file
-        workflow_state: Current workflow state
-        circuit_breaker: Safety controls instance
-
-    Returns:
-        Dictionary with coverage analysis results,
-        or a skip result if no CSV was provided
+    Returns a skip result if no CSV was provided.
     """
 
     agent_name = "Coverage Analyser"
     agent_start_time = time.time()
 
-    # If no existing suite provided, skip gracefully
     if not existing_suite_path:
         return {
             "skipped": True,
@@ -88,8 +51,7 @@ def analyse_coverage(
             "duplicates": [],
             "coverage_estimate": "Unknown - no baseline for comparison",
             "recommendations": [
-                "Upload an existing test suite CSV on the next run "
-                "to get a coverage gap analysis."
+                "Upload an existing test suite CSV on the next run for gap analysis."
             ],
             "update_candidates": [],
             "coverage_summary": "Coverage analysis was skipped as no existing test suite was provided."
@@ -98,7 +60,6 @@ def analyse_coverage(
     if circuit_breaker:
         circuit_breaker.check_all(agent_name, agent_start_time)
 
-    # Read the existing test suite
     test_suite = read_test_suite(existing_suite_path)
 
     if not test_suite or test_suite.total_count == 0:
@@ -113,72 +74,65 @@ def analyse_coverage(
             "coverage_summary": "Coverage analysis was skipped due to file reading issues."
         }
 
-    # Format existing suite for the agent
     existing_suite_text = format_for_agent(test_suite, max_cases=50)
 
-    # Format new test cases for comparison
     new_test_cases = test_cases_output.get("test_cases", [])
-    new_cases_text = "\n".join([
-        f"  {tc.get('tc_id')}: [{tc.get('category')}] {tc.get('title')}"
-        for tc in new_test_cases[:50]
-    ])
+    new_cases_lines = []
+    for tc in new_test_cases[:50]:
+        new_cases_lines.append(
+            f"  {tc.get('tc_id')}: [{tc.get('category')}] {tc.get('title')}"
+        )
+    new_cases_text = "\n".join(new_cases_lines)
 
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-    prompt = f"""Compare the newly generated test cases against the existing test suite.
+    prompt = (
+        "Compare newly generated test cases against the existing test suite.\n\n"
+        f"REQUIREMENT:\n{requirement}\n\n"
+        f"NEWLY GENERATED TEST CASES ({len(new_test_cases)} total):\n"
+        f"{new_cases_text}\n\n"
+        f"EXISTING TEST SUITE:\n{existing_suite_text}\n\n"
+        "Respond with ONLY a valid JSON object:\n\n"
+        "{\n"
+        '  "gaps": [\n'
+        "    {\n"
+        '      "scenario": "Description of uncovered scenario",\n'
+        '      "category": "Functional",\n'
+        '      "risk_level": "High",\n'
+        '      "recommendation": "Suggested action"\n'
+        "    }\n"
+        "  ],\n"
+        '  "duplicates": [\n'
+        "    {\n"
+        '      "new_test": "TC_ID of new test",\n'
+        '      "existing_test": "Title of similar existing test",\n'
+        '      "overlap_description": "What they both test",\n'
+        '      "recommendation": "Keep new, merge, or skip"\n'
+        "    }\n"
+        "  ],\n"
+        '  "update_candidates": [\n'
+        "    {\n"
+        '      "existing_test": "Title of existing test needing update",\n'
+        '      "reason": "Why it needs updating"\n'
+        "    }\n"
+        "  ],\n"
+        '  "coverage_estimate": "75% - existing suite covers most scenarios",\n'
+        '  "new_tests_adding_value": 18,\n'
+        '  "new_tests_duplicating": 3,\n'
+        '  "coverage_summary": "2-3 sentence summary of coverage picture",\n'
+        '  "recommendations": ["Specific actionable recommendation"]\n'
+        "}\n\n"
+        "Rules:\n"
+        "- Only identify genuine gaps - not scenarios unrelated to the requirement\n"
+        "- Only identify genuine duplicates - partial similarity is not a duplicate\n"
+        "- coverage_estimate should be a realistic percentage with brief explanation\n"
+        "- new_tests_adding_value and new_tests_duplicating must be integers\n"
+        "- Do not add any text before or after the JSON\n"
+        "- Do not wrap in markdown code blocks"
+    )
 
-REQUIREMENT BEING TESTED:
-{requirement}
-
-NEWLY GENERATED TEST CASES ({len(new_test_cases)} total):
-{new_cases_text}
-
-EXISTING TEST SUITE:
-{existing_suite_text}
-
-Analyse the overlap and gaps between these two sets.
-
-Respond with ONLY a valid JSON object matching this exact schema:
-
-{{
-  "gaps": [
-    {{
-      "scenario": "Description of the testing scenario not covered by existing tests",
-      "category": "Functional",
-      "risk_level": "High",
-      "recommendation": "Suggested action to fill this gap"
-    }}
-  ],
-  "duplicates": [
-    {{
-      "new_test": "TC_ID of the new test case",
-      "existing_test": "Title or ID of the similar existing test",
-      "overlap_description": "What they both test",
-      "recommendation": "Keep new, merge, or skip"
-    }}
-  ],
-  "update_candidates": [
-    {{
-      "existing_test": "Title or ID of existing test that needs updating",
-      "reason": "Why it needs to be updated based on the new requirement"
-    }}
-  ],
-  "coverage_estimate": "75% - existing suite covers most scenarios",
-  "new_tests_adding_value": 18,
-  "new_tests_duplicating": 3,
-  "coverage_summary": "2-3 sentence summary of the overall coverage picture",
-  "recommendations": [
-    "Specific actionable recommendations for the QA team"
-  ]
-}}
-
-Rules:
-- Only identify genuine gaps - do not fabricate scenarios not related to the requirement
-- Only identify genuine duplicates - partial similarity is not a duplicate
-- coverage_estimate should be a realistic percentage with brief explanation
-- new_tests_adding_value and new_tests_duplicating must be integers
-- Do not add any text before or after the JSON
-- Do not wrap in markdown code blocks"""
+    if correction_notes:
+        prompt += f"\n\nCORRECTION REQUIRED - please fix these issues:\n{correction_notes}"
 
     max_retries = int(os.getenv("MAX_RETRIES", "3"))
     last_error = None
@@ -190,9 +144,7 @@ Rules:
                 max_tokens=3000,
                 temperature=0,
                 system=SYSTEM_PROMPT,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
+                messages=[{"role": "user", "content": prompt}]
             )
 
             if workflow_state and circuit_breaker:
@@ -214,7 +166,7 @@ Rules:
             result["skipped"] = False
             result["existing_suite_count"] = test_suite.total_count
 
-            if workflow_state:
+            if workflow_state and not correction_attempt:
                 workflow_state.completed_agents.append(agent_name)
 
             return result

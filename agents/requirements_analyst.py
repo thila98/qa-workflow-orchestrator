@@ -6,25 +6,6 @@ The first agent in the QA workflow pipeline.
 Human job it replaces: Business Analyst / QA Lead
 reading through requirements at sprint kickoff and
 identifying gaps before test planning begins.
-
-What it does:
-- Reads the requirement text
-- Identifies missing information that would block testing
-- Flags ambiguous language that could mean multiple things
-- Lists unstated assumptions being made
-- Checks for testability
-- Scores requirement quality 1-10
-
-Why this matters:
-Poor requirements are the #1 cause of missed defects.
-If you start writing test cases before identifying gaps,
-you end up testing the wrong things confidently.
-
-Edge cases handled:
-- Vague or generic requirements
-- Requirements with contradictions
-- Very long requirements (summarised first)
-- Requirements missing acceptance criteria
 """
 
 import os
@@ -35,10 +16,6 @@ from anthropic import Anthropic
 
 load_dotenv()
 
-
-# The system prompt defines the agent role.
-# It lives here in the system prompt - never in user input.
-# This prevents prompt injection from overwriting the agent role.
 SYSTEM_PROMPT = """You are a Senior Business Analyst and QA Lead with 15 years of experience
 reviewing software requirements before testing begins.
 
@@ -51,16 +28,16 @@ Your role is to analyse a given requirement and identify:
 
 You are thorough, precise, and focused on what matters for quality assurance.
 You do not make up information. You only analyse what is provided.
-If something is not clear, you flag it as a gap - you never guess.
-
 Always respond in valid JSON format matching the exact schema provided."""
 
 
 def analyse_requirements(
-    requirement: str,
+    requirement,
     workflow_state=None,
-    circuit_breaker=None
-) -> dict:
+    circuit_breaker=None,
+    correction_notes=None,
+    correction_attempt=False
+):
     """
     Analyses a requirement and returns structured findings.
 
@@ -68,67 +45,54 @@ def analyse_requirements(
         requirement: The cleaned, validated requirement text
         workflow_state: Current workflow state for cost/retry tracking
         circuit_breaker: Safety controls instance
+        correction_notes: Feedback from Judge Agent to improve output
+        correction_attempt: True if this is a correction re-run
 
     Returns:
-        Dictionary with analysis results matching the schema
+        Dictionary with analysis results
     """
 
     agent_name = "Requirements Analyst"
     agent_start_time = time.time()
 
-    # Check safety limits before doing any work
     if circuit_breaker:
         circuit_breaker.check_all(agent_name, agent_start_time)
 
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-    # The prompt tells the agent exactly what schema to output.
-    # Strict schema = no hallucination in structure,
-    # even if content varies.
-    prompt = f"""Analyse the following software requirement for a QA engineer who needs to write test cases.
+    prompt = (
+        "Analyse the following software requirement for a QA engineer who needs to write test cases.\n\n"
+        f"REQUIREMENT:\n{requirement}\n\n"
+        "Respond with ONLY a valid JSON object matching this exact schema:\n\n"
+        "{\n"
+        '  "summary": "2-3 sentence plain English summary of what this feature does",\n'
+        '  "gaps": ["gap 1 under 15 words", "gap 2 under 15 words"],\n'
+        '  "ambiguities": ["ambiguity 1 under 15 words", "ambiguity 2 under 15 words"],\n'
+        '  "assumptions": ["assumption 1 under 15 words", "assumption 2 under 15 words"],\n'
+        '  "acceptance_criteria_present": true,\n'
+        '  "is_testable": true,\n'
+        '  "quality_score": 7,\n'
+        '  "quality_reasoning": "One sentence explanation of the score",\n'
+        '  "needs_clarification": false,\n'
+        '  "clarification_questions": ["question 1", "question 2"],\n'
+        '  "key_test_areas": ["area 1", "area 2", "area 3"]\n'
+        "}\n\n"
+        "Rules:\n"
+        "- quality_score must be an integer between 1 and 10\n"
+        "- gaps, ambiguities, assumptions must be lists (can be empty lists if none found)\n"
+        "- is_testable must be true or false\n"
+        "- needs_clarification must be true or false\n"
+        "- STRICT LIMIT: maximum 5 items per list\n"
+        "- STRICT LIMIT: maximum 15 words per list item\n"
+        "- summary maximum 2 sentences\n"
+        "- quality_reasoning maximum 1 sentence\n"
+        "- Do not add any text before or after the JSON\n"
+        "- Do not wrap the JSON in markdown code blocks"
+    )
 
-REQUIREMENT:
-{requirement}
+    if correction_notes:
+        prompt += f"\n\nCORRECTION REQUIRED - please fix these issues in your response:\n{correction_notes}"
 
-Respond with ONLY a valid JSON object matching this exact schema:
-
-{{
-  "summary": "2-3 sentence plain English summary of what this feature does",
-  "gaps": [
-    "List each piece of missing information that would block test case writing",
-    "Be specific about what is missing and why it matters for testing"
-  ],
-  "ambiguities": [
-    "List each statement that could be interpreted in multiple ways",
-    "Explain what the different interpretations could be"
-  ],
-  "assumptions": [
-    "List each thing the requirement assumes but does not explicitly state"
-  ],
-  "acceptance_criteria_present": true,
-  "is_testable": true,
-  "quality_score": 7,
-  "quality_reasoning": "Brief explanation of why you gave this score",
-  "needs_clarification": false,
-  "clarification_questions": [
-    "List any questions that must be answered before testing can begin"
-  ],
-  "key_test_areas": [
-    "List the main functional areas that will need test coverage"
-  ]
-}}
-
-Rules:
-- quality_score must be an integer between 1 and 10
-- gaps, ambiguities, assumptions must be lists (can be empty lists if none found)
-- is_testable must be true or false
-- needs_clarification must be true or false
-- Do not add any text before or after the JSON
-- Do not wrap the JSON in markdown code blocks
-- Keep each list item concise - maximum 1 sentence each
-- Limit gaps, ambiguities and assumptions to maximum 5 items each"""
-
-    # Retry loop - handles transient API failures
     max_retries = int(os.getenv("MAX_RETRIES", "3"))
     last_error = None
 
@@ -137,14 +101,13 @@ Rules:
             response = client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=3000,
-                temperature=0,  # Temperature 0 = most consistent outputs
+                temperature=0,
                 system=SYSTEM_PROMPT,
                 messages=[
                     {"role": "user", "content": prompt}
                 ]
             )
 
-            # Track cost if workflow state provided
             if workflow_state and circuit_breaker:
                 cost = circuit_breaker.estimate_cost(
                     input_tokens=response.usage.input_tokens,
@@ -152,10 +115,8 @@ Rules:
                 )
                 circuit_breaker.record_cost(cost)
 
-            # Parse and return the JSON response
             raw_output = response.content[0].text.strip()
 
-            # Remove markdown code blocks if model added them despite instructions
             if raw_output.startswith("```"):
                 raw_output = raw_output.split("```")[1]
                 if raw_output.startswith("json"):
@@ -164,8 +125,7 @@ Rules:
 
             result = json.loads(raw_output)
 
-            # Track successful completion
-            if workflow_state:
+            if workflow_state and not correction_attempt:
                 workflow_state.completed_agents.append(agent_name)
 
             return result
@@ -175,7 +135,7 @@ Rules:
             if circuit_breaker:
                 circuit_breaker.record_retry(agent_name)
             if attempt < max_retries - 1:
-                time.sleep(2)  # Brief pause before retry
+                time.sleep(2)
             continue
 
         except Exception as e:
@@ -186,7 +146,6 @@ Rules:
                 time.sleep(2)
             continue
 
-    # All retries exhausted
     if workflow_state:
         workflow_state.failed_agents.append(agent_name)
 

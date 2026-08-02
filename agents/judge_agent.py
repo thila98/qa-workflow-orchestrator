@@ -136,9 +136,10 @@ Rules:
 - passed must be true or false
 - confidence_score must be 0.0 to 1.0
 - recommendation must be: PASS, PASS_WITH_WARNINGS, or FAIL
-- FAIL if: hallucinations detected, major missing elements, or serious inconsistencies
-- PASS_WITH_WARNINGS if: minor issues that do not invalidate the output
+- FAIL if: major hallucinations that fundamentally change meaning, or structural output failure
+- PASS_WITH_WARNINGS if: minor inferences or assumptions not explicitly in requirement, small inconsistencies
 - PASS if: output is solid and ready for the next agent
+- NOTE: Minor inferences like UI behaviour or common defaults should be PASS_WITH_WARNINGS not FAIL
 - hallucination_flags should list SPECIFIC fabricated claims, not general concerns
 - Do not add any text before or after the JSON
 - Do not wrap in markdown code blocks"""
