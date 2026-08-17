@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run validators and edge case tests
+        run: |
+          pytest tests/test_validators.py tests/test_edge_cases.py -v
+
+      - name: Run syntax check on all agents
+        run: |
+          python -m py_compile agents/requirements_analyst.py
+          python -m py_compile agents/risk_assessor.py
+          python -m py_compile agents/test_strategist.py
+          python -m py_compile agents/test_case_writer.py
+          python -m py_compile agents/coverage_analyser.py
+          python -m py_compile agents/report_writer.py
+          python -m py_compile agents/judge_agent.py
+          python -m py_compile main.py
+          python -m py_compile app.py
+          echo "All syntax checks passed"
